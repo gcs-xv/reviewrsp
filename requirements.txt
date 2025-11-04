@@ -1,4 +1,4 @@
 streamlit
 pillow
-pytesseract
-streamlit-cropper
+easyocr
+opencv-python-headless
