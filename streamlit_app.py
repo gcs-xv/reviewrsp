@@ -1,45 +1,60 @@
 import re
-import io
 from typing import List, Optional
 
 import streamlit as st
-from PIL import Image
-try:
-    import pytesseract
-except ImportError:
-    pytesseract = None
+from PIL import Image, ImageOps, ImageFilter
 
-# ========== Helpers ==========
+# ====== TRY OCR (safe fallback) ======
+def ocr_image_to_text(img: Image.Image) -> str:
+    try:
+        import pytesseract
+    except Exception:
+        return ""
+    # Preprocess: grayscale + adaptive threshold + sharpen
+    g = ImageOps.grayscale(img)
+    g = g.filter(ImageFilter.SHARPEN)
+    # coba threshold ringan untuk font kecil
+    try:
+        g = ImageOps.invert(ImageOps.autocontrast(g.point(lambda x: 0 if x < 160 else 255)))
+    except Exception:
+        pass
+    cfg = r"--oem 3 --psm 6"
+    try:
+        txt = pytesseract.image_to_string(g, lang="eng+ind", config=cfg)
+    except Exception:
+        txt = ""
+    return txt
+
+# ====== UTIL ======
+def title_case_keep(s: str) -> str:
+    if not s: return ""
+    return " ".join(w.capitalize() for w in re.split(r"\s+", s.strip()))
+
+def normalize_key(s: str) -> str:
+    return re.sub(r"[^a-z]", "", (s or "").lower())
+
 def format_rm_with_dots(rm_raw: str) -> str:
     digits = re.sub(r"\D", "", rm_raw or "")
     if not digits:
         return ""
-    # format: 6 digit -> 2.2.2 ; 7 digit -> 1.2.2.2 ; flexible fallback
     if len(digits) == 6:
         parts = [digits[0:2], digits[2:4], digits[4:6]]
     elif len(digits) == 7:
         parts = [digits[0:1], digits[1:3], digits[3:5], digits[5:7]]
     else:
-        # group by 2s
         parts = [digits[i:i+2] for i in range(0, len(digits), 2)]
-    return ".".join(parts)
+    return ".".join([p for p in parts if p])
 
 def format_date_ddmmyyyy(s: str) -> str:
-    if not s:
-        return ""
+    if not s: return ""
     s = s.strip()
-    m = re.search(r"(\d{4})[-/\.](\d{2})[-/\.](\d{2})", s)
+    m = re.search(r"(\d{4})[-/.](\d{2})[-/.](\d{2})", s)
     if m:
-        y, mo, d = m.groups()
-        return f"{d}/{mo}/{y}"
-    m = re.search(r"(\d{2})[-/\.](\d{2})[-/\.](\d{4})", s)
+        y, mo, d = m.groups(); return f"{d}/{mo}/{y}"
+    m = re.search(r"(\d{2})[-/.](\d{2})[-/.](\d{4})", s)
     if m:
-        d, mo, y = m.groups()
-        return f"{d}/{mo}/{y}"
-    return s  # fallback
-
-def normalize_key(s: str) -> str:
-    return re.sub(r"[^a-z]", "", (s or "").lower())
+        d, mo, y = m.groups(); return f"{d}/{mo}/{y}"
+    return s
 
 DPJP_CANONICAL = [
     "Prof. drg. Muhammad Ruslin, M.Kes., Ph.D., Sp.B.M.M., Subsp. Orthognat-D (K)",
@@ -47,241 +62,206 @@ DPJP_CANONICAL = [
     "drg. Mohammad Gazali, MARS., Sp.B.M.M., Subsp.T.M.T.M.J(K)",
     "drg. Carolina Stevanie, Sp.B.M.M.",
 ]
-
-# buat index normalisasi (kata kunci pendek juga dikenali)
-DPJP_INDEX = {normalize_key(v): v for v in DPJP_CANONICAL}
 DPJP_ALIASES = {
     "ruslin": DPJP_CANONICAL[0],
-    "yossyyoanitaariestiana": DPJP_CANONICAL[1],
     "yossy": DPJP_CANONICAL[1],
+    "yoanitaar": DPJP_CANONICAL[1],
     "gazali": DPJP_CANONICAL[2],
-    "carolinastevanie": DPJP_CANONICAL[3],
     "carolina": DPJP_CANONICAL[3],
+    "carolinastevanie": DPJP_CANONICAL[3],
 }
-
 def map_dpjp(raw: str) -> str:
     key = normalize_key(raw)
-    # cocok exact normalisasi
-    if key in DPJP_INDEX:
-        return DPJP_INDEX[key]
-    # alias pendek
+    if not key: return ""
     for k, v in DPJP_ALIASES.items():
-        if k in key:
-            return v
-    # fallback: biarkan apa adanya (nanti user bisa pilih dari selectbox)
+        if k in key: return v
+    # coba cocokkan nama belakang
+    for canon in DPJP_CANONICAL:
+        if any(p in key for p in normalize_key(canon).split()):
+            return canon
     return raw
 
 def split_plan_to_items(plan_text: str) -> List[str]:
-    if not plan_text:
-        return []
-    # ganti pemisah umum menjadi newline
-    text = plan_text.replace("•", "\n").replace("·", "\n")
-    text = re.sub(r"\s*[-–]\s*", "\n", text)  # strip dash bullets
-    text = text.replace(",", "\n")  # sering dipisah koma
-    # pecah baris, bersihkan
-    items = [re.sub(r"\s+", " ", x).strip(" .") for x in text.splitlines()]
-    # filter baris kosong & yang terlalu generik
-    items = [i for i in items if i and not i.lower().startswith(("instruksi", "evaluasi"))]
-    # dedup sambil pertahankan urutan
-    seen, dedup = set(), []
-    for i in items:
-        k = i.lower()
-        if k not in seen:
-            dedup.append(i)
-            seen.add(k)
-    return dedup
+    if not plan_text: return []
+    t = plan_text
+    t = t.replace("•", "\n").replace("·", "\n")
+    t = re.sub(r"\s*[-–•]\s*", "\n", t)
+    t = t.replace(",", "\n")
+    rows = [re.sub(r"\s+", " ", r).strip(" .") for r in t.splitlines()]
+    rows = [r for r in rows if r and not r.lower().startswith(("instruksi", "evaluasi"))]
+    # Normalisasi frasa umum
+    rep = {
+        r"\bopg\b": "OPG X-ray",
+        r"\bkonsul\b": "Konsul interna",
+        r"\bkonsultasi\b": "Konsultasi",
+        r"\bodontektomi\b": "Odontektomi",
+    }
+    norm = []
+    seen = set()
+    for r in rows:
+        x = r
+        for k, v in rep.items():
+            x = re.sub(k, v, x, flags=re.I)
+        kx = x.lower()
+        if kx not in seen:
+            norm.append(x)
+            seen.add(kx)
+    return norm
 
 def pick_kontrol(items: List[str]) -> Optional[str]:
     for i in items:
-        if i.lower().startswith(("pro ", "pro-", "pro/")):
+        if i.lower().startswith(("pro ", "pro-", "pro")):
             return i
     return items[0] if items else None
 
 def render_tindakan(items: List[str]) -> str:
-    items = [i for i in items if i]  # clean
+    items = [i for i in items if i]
     if len(items) <= 1:
         return f"• Tindakan        : {items[0] if items else ''}"
-    else:
-        bullets = "\n".join([f"    * {i}" for i in items])
-        return f"• Tindakan        :\n{bullets}"
+    return "• Tindakan        :\n" + "\n".join([f"    * {i}" for i in items])
 
-def ocr_image_to_text(img: Image.Image) -> str:
-    if pytesseract is None:
-        return ""
-    return pytesseract.image_to_string(img, lang="ind+eng")
+# ====== PARSER OCR ======
+def parse_from_ocr(txt: str) -> dict:
+    g = dict(nama="", tgl_lahir="", rm="", telepon="", dpjp_raw="", diagnosa="", plan="")
+    if not txt: return g
+    lines = [l.strip() for l in txt.splitlines() if l.strip()]
+    raw = "\n".join(lines)
 
-def guess_fields(ocr: str) -> dict:
-    guess = {
-        "nama": "",
-        "tgl_lahir": "",
-        "rm": "",
-        "telepon": "",
-        "diagnosa": "",
-        "plan": "",
-        "dpjp_raw": "",
-    }
-    if not ocr:
-        return guess
+    # RM: biasanya deretan 6-7 digit dekat kata "Pasien"
+    m = re.search(r"\bPasien\b[^0-9]*([0-9]{6,8})", raw, re.I)
+    if not m:
+        m = re.search(r"\bNo\.?\s*RM\b[^0-9]*([0-9]{6,8})", raw, re.I)
+    if m: g["rm"] = m.group(1)
 
-    lines = [l.strip() for l in ocr.splitlines() if l.strip()]
+    # Nama: setelah nomor RM di baris pasien
+    m = re.search(r"\bPasien\b.*?(?:\d{6,8}\s*)([A-Z][A-Z \.'-]{2,})", raw, re.I)
+    if m: g["nama"] = title_case_keep(m.group(1))
 
-    # Nama & RM: cari baris berawalan "Pasien"
-    for ln in lines:
-        if re.search(r"\bPasien\b", ln, re.I):
-            # contoh: "Pasien : 253385 PRICYLIA STEFINA PALIMBONG"
-            m_rm = re.search(r"(\d{5,8})", ln)
-            if m_rm:
-                guess["rm"] = m_rm.group(1)
-            # ambil sisa huruf kapital setelah angka
-            m_name = re.search(r"\d+\s+([A-Z \.\-']{3,})", ln)
-            if m_name:
-                guess["nama"] = m_name.group(1).title()
-            break
-
-    # Tgl lahir
-    m = re.search(r"(\d{4}[-/\.]\d{2}[-/\.]\d{2}|\d{2}[-/\.]\d{2}[-/\.]\d{4})", ocr)
-    if m:
-        guess["tgl_lahir"] = m.group(1)
+    # Tanggal lahir
+    m = re.search(r"(?:Tgl\.?\s*Lahir|Tanggal\s*Lahir|Tgl\.?\s*Lahir).*?(\d{4}[-/.]\d{2}[-/.]\d{2}|\d{2}[-/.]\d{2}[-/.]\d{4})", raw, re.I)
+    if not m:
+        m = re.search(r"(\d{4}[-/.]\d{2}[-/.]\d{2}|\d{2}[-/.]\d{2}[-/.]\d{4})", raw)
+    if m: g["tgl_lahir"] = m.group(1)
 
     # Telepon
-    m = re.search(r"(08\d{8,13})", ocr)
-    if m:
-        guess["telepon"] = m.group(1)
+    m = re.search(r"(08\d{8,13})", raw)
+    if m: g["telepon"] = m.group(1)
 
-    # DPJP (Dokter/Paramedis baris)
+    # DPJP (baris Dokter/Paramedis)
     for i, ln in enumerate(lines):
-        if "Dokter/Paramedis" in ln or "Dokter / Paramedis" in ln:
-            # biasanya nama dokter ada di baris berikutnya
-            if i + 1 < len(lines):
-                guess["dpjp_raw"] = lines[i + 1]
+        if re.search(r"Dokter/?Paramedis", ln, re.I):
+            if i+1 < len(lines): g["dpjp_raw"] = lines[i+1]
             break
-    # fallback: cari "drg." terdekat dengan CPPT
-    if not guess["dpjp_raw"]:
+    if not g["dpjp_raw"]:
+        m = re.search(r"(drg\.[^\n]{5,})", raw, re.I)
+        if m: g["dpjp_raw"] = m.group(1)
+
+    # Diagnosis: blok setelah "Asesmen/Intervensi" atau "Objek/Diagnosis"
+    def grab_block(start_pat, stop_pats):
+        take = False; out=[]
         for ln in lines:
-            if re.search(r"\bdrg\.", ln, re.I):
-                guess["dpjp_raw"] = ln
-                break
+            if re.search(start_pat, ln, re.I): take=True; continue
+            if take and any(re.search(p, ln, re.I) for p in stop_pats): break
+            if take: out.append(ln)
+        return " ".join(out).strip()
 
-    # Diagnosa
-    # cari teks setelah "Asesmen/Intervensi" atau "Objek/Diagnosis"
-    diag = []
-    hit = False
-    for ln in lines:
-        if re.search(r"(Objek/Diagnosis|Objek Diagnosa|Diagnosis)", ln, re.I):
-            hit = True
-            continue
-        if hit:
-            if re.search(r"(Asesmen/Intervensi|Plan/Monitoring|Instruksi|Evaluasi)", ln, re.I):
-                break
-            diag.append(ln)
-    if diag:
-        guess["diagnosa"] = " ".join(diag)
+    diagnosa = grab_block(r"(Objek/Diagnosis|Objek Diagnosa)", [r"Asesmen/Intervensi", r"Plan/Monitoring", r"Instruksi", r"Evaluasi", r"CPPT"])
+    if not diagnosa:
+        diagnosa = grab_block(r"Asesmen/Intervensi", [r"Plan/Monitoring", r"Instruksi", r"Evaluasi", r"CPPT"])
+    g["diagnosa"] = re.sub(r"\s+", " ", diagnosa)
 
-    # Plan/Monitoring
-    plan = []
-    hit = False
-    for ln in lines:
-        if re.search(r"Plan/Monitoring", ln, re.I):
-            hit = True
-            continue
-        if hit:
-            if re.search(r"(Instruksi|Evaluasi|CPPT|Riwayat|Tanggal|Dokter/Paramedis)", ln, re.I):
-                break
-            plan.append(ln)
-    guess["plan"] = " ".join(plan)
+    plan = grab_block(r"Plan/Monitoring", [r"Instruksi", r"Evaluasi", r"CPPT", r"Riwayat", r"Tanggal", r"Dokter/Paramedis"])
+    g["plan"] = re.sub(r"\s+", " ", plan)
 
-    return guess
+    return g
 
-# ========== UI ==========
+# ====== STREAMLIT UI ======
 st.set_page_config(page_title="RSPTN Review Generator", page_icon="📝", layout="centered")
 st.title("📝 RSPTN Review Generator")
 
-st.markdown(
-    "Upload **screenshot SIMRS**, cek hasil ekstraksi, koreksi jika perlu, "
-    "lalu klik *Generate* untuk dapatkan review yang seragam."
-)
+# kumpulan review multi pasien
+if "reviews" not in st.session_state:
+    st.session_state.reviews = []
 
-img_file = st.file_uploader("Upload screenshot (.png/.jpg)", type=["png", "jpg", "jpeg"])
+uploaded = st.file_uploader("Upload screenshot SIMRS (.png/.jpg)", type=["png","jpg","jpeg"])
+raw_ocr = ""
+if uploaded:
+    img = Image.open(uploaded)
+    st.image(img, caption="Screenshot diupload", use_column_width=True)
+    raw_ocr = ocr_image_to_text(img)
 
-col_debug = st.checkbox("Tampilkan debug OCR & teks mentah", value=False)
+guess = parse_from_ocr(raw_ocr) if raw_ocr else dict(nama="", tgl_lahir="", rm="", telepon="", dpjp_raw="", diagnosa="", plan="")
 
-with st.form("review_form"):
-    if img_file:
-        image = Image.open(img_file)
-        st.image(image, caption="Screenshot diupload", use_column_width=True)
-
-        ocr_text = ocr_image_to_text(image)
-        g = guess_fields(ocr_text)
-
-        nama = st.text_input("Nama", g["nama"])
-        tgl_lahir = st.text_input("Tanggal lahir (yyyy-mm-dd / dd-mm-yyyy)", format_date_ddmmyyyy(g["tgl_lahir"]))
-        rm = st.text_input("Nomor RM (mentah)", g["rm"])
-        rm_formatted = format_rm_with_dots(rm)
-        st.caption(f"RM terformat: **{rm_formatted or '—'}**")
-
-        telepon = st.text_input("No. Telepon", g["telepon"])
-        diagnosa = st.text_area("Diagnosa (utama)", g["diagnosa"], height=80)
-        plan_raw = st.text_area("Plan/Monitoring (raw)", g["plan"], height=100)
-
-        tindakan_items_default = split_plan_to_items(plan_raw)
-        tindakan_items = st.experimental_data_editor(
-            [{"tindakan": t} for t in (tindakan_items_default or [""])],
-            num_rows="dynamic",
-            use_container_width=True,
-            key="tindakan_editor",
-        )
-        tindakan_list = [row["tindakan"].strip() for row in tindakan_items if row.get("tindakan", "").strip()]
-
-        kontrol_auto = pick_kontrol(tindakan_list)
-        kontrol = st.text_input("Kontrol (ambil otomatis item 'Pro ...' / ubah manual)", kontrol_auto or "")
-
+with st.form("frm"):
+    col1, col2 = st.columns(2)
+    with col1:
+        nama = st.text_input("Nama", guess["nama"])
+        tgl_lahir = st.text_input("Tanggal Lahir (yyyy-mm-dd / dd-mm-yyyy)", format_date_ddmmyyyy(guess["tgl_lahir"]))
+        rm_raw = st.text_input("Nomor RM (mentah)", guess["rm"])
+        rm_fmt = format_rm_with_dots(rm_raw)
+        st.caption(f"RM terformat: **{rm_fmt or '—'}**")
+        telepon = st.text_input("No. Telp", guess["telepon"])
+    with col2:
         # DPJP mapping
-        dpjp_guess = map_dpjp(g["dpjp_raw"])
-        dpjp = st.selectbox(
-            "DPJP (mapped)",
-            options=["(Pilih dari daftar/biarkan teks mentah)"] + DPJP_CANONICAL,
-            index=(DPJP_CANONICAL.index(dpjp_guess) + 1) if dpjp_guess in DPJP_CANONICAL else 0,
-        )
-        if dpjp == "(Pilih dari daftar/biarkan teks mentah)":
-            dpjp = st.text_input("Atau tulis DPJP manual", value=dpjp_guess)
-
+        dpjp_guess = map_dpjp(guess.get("dpjp_raw",""))
+        dpjp_choice = st.selectbox("DPJP (mapping)", ["(Pilih)"] + DPJP_CANONICAL,
+                                   index=(DPJP_CANONICAL.index(dpjp_guess)+1) if dpjp_guess in DPJP_CANONICAL else 0)
+        dpjp = dpjp_choice if dpjp_choice != "(Pilih)" else st.text_input("Atau isi DPJP manual", dpjp_guess)
         operator = st.text_input("Operator (manual)", "")
 
-        # ===== Submit =====
-        submitted = st.form_submit_button("Generate Review")
+    diagnosa = st.text_area("Diagnosa (utama)", guess["diagnosa"], height=140)
+    plan_raw = st.text_area("Plan/Monitoring (raw)", guess["plan"], height=160)
 
-        if submitted:
-            # Format akhir
-            lines = []
-            lines.append(f"Nama            : {nama}".strip())
-            lines.append(f"• Tanggal Lahir  : {format_date_ddmmyyyy(tgl_lahir)}")
-            lines.append(f"• RM             : {format_rm_with_dots(rm)}")
-            lines.append(f"• Diagnosa       : {diagnosa}")
-            lines.append(render_tindakan(tindakan_list))
-            lines.append(f"• Kontrol        : {kontrol or ''}")
-            lines.append(f"• DPJP           : {dpjp}")
-            lines.append(f"• No. Telp.      : {telepon}")
-            lines.append(f"• Operator       : {operator}")
+    # daftar tindakan editable
+    default_items = split_plan_to_items(plan_raw) or [""]
+    data_rows = [{"Tindakan": t} for t in default_items]
+    edited = st.data_editor(data_rows, num_rows="dynamic", use_container_width=True, key="tindak")
+    tindakan_list = [r["Tindakan"].strip() for r in edited if r.get("Tindakan","").strip()]
+    kontrol_auto = pick_kontrol(tindakan_list)
+    kontrol = st.text_input("Kontrol (ambil otomatis item 'Pro ...' / ubah manual)", kontrol_auto or "")
 
-            review_text = "\n".join(lines)
+    # === Submit button SELALU ADA ===
+    ok = st.form_submit_button("OK – Generate Review")
 
-            st.success("Review berhasil dibuat!")
-            st.code(review_text, language="markdown")
-            st.download_button("⬇️ Download .txt", data=review_text.encode("utf-8"),
-                               file_name="review_pasien.txt", mime="text/plain")
+# hasil
+if ok:
+    lines = []
+    lines.append(f"Nama            : {nama}".strip())
+    lines.append(f"• Tanggal Lahir  : {format_date_ddmmyyyy(tgl_lahir)}")
+    lines.append(f"• RM             : {format_rm_with_dots(rm_raw)}")
+    lines.append(f"• Diagnosa       : {diagnosa}")
+    # aturan bullet
+    if len(tindakan_list) <= 1:
+        lines.append(f"• Tindakan        : {tindakan_list[0] if tindakan_list else ''}")
     else:
-        st.info("Silakan upload screenshot terlebih dahulu.")
+        lines.append("• Tindakan        :")
+        for t in tindakan_list:
+            lines.append(f"    * {t}")
+    lines.append(f"• Kontrol        : {kontrol or ''}")
+    lines.append(f"• DPJP           : {dpjp}")
+    lines.append(f"• No. Telp.      : {telepon}")
+    lines.append(f"• Operator       : {operator}")
 
-    if col_debug and img_file:
-        st.divider()
-        st.subheader("Debug OCR")
-        if pytesseract is None:
-            st.warning("pytesseract belum terpasang di server. Tambahkan ke requirements.txt")
-        else:
-            st.text_area("Teks OCR mentah", ocr_text, height=240)
+    review = "\n".join(lines)
+    st.success("Review dibuat.")
+    st.code(review, language="markdown")
 
-st.markdown("---")
-st.caption(
-    "Catatan: OCR bisa tidak sempurna. Form di atas memungkinkan koreksi cepat. "
-    "DPJP dimapping otomatis ke daftar resmi; operator diisi manual."
-)
+    # simpan ke list multi pasien
+    st.session_state.reviews.append(review)
+
+st.divider()
+st.subheader("📦 Kumpulan Review (multi pasien)")
+if st.session_state.reviews:
+    all_text = "\n\n".join(st.session_state.reviews)
+    st.code(all_text, language="markdown")
+    st.download_button("⬇️ Download semua review (.txt)", data=all_text.encode("utf-8"),
+                       file_name="review_pasien_semua.txt", mime="text/plain")
+else:
+    st.caption("Belum ada review yang disimpan. Generate dulu lalu otomatis masuk ke sini.")
+
+# Debug optional
+with st.expander("Debug OCR (opsional)"):
+    if raw_ocr:
+        st.text_area("Teks OCR mentah", raw_ocr, height=260)
+    else:
+        st.caption("OCR kosong atau Tesseract belum terpasang.")
