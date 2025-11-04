@@ -1,181 +1,158 @@
 from bs4 import BeautifulSoup
 import re
-from datetime import datetime
 from dateutil import parser as dtparser
 
-DPJP_MAP = {
-    "ruslin": "Prof. drg. Muhammad Ruslin, M.Kes., Ph.D., Sp.B.M.M., Subsp. Orthognat-D (K)",
-    "yossy": "drg. Yossy Yoanita Ariestiana, M.KG., Sp.B.M.M., Subsp.Ortognat-D(K).",
-    "gazali": "drg. Mohammad Gazali, MARS., Sp.B.M.M., Subsp.T.M.T.M.J(K)",
-    "carolina": "drg. Carolina Stevanie, Sp.B.M.M.",
-}
-DPJP_CANON = list(DPJP_MAP.values())
+# ====== format & util ======
+LABEL_COL = 15
+def fmt_main(label, val):   return f"{label:<{LABEL_COL}} : {val}".rstrip()
+def fmt_bullet(label, val): return f"• {label:<{LABEL_COL}} : {val}".rstrip()
+def fmt_head(label):        return f"• {label:<{LABEL_COL}} :"
 
-def _norm_space(s): return re.sub(r"\s+", " ", (s or "").strip())
-def _title_case_keep(s): return " ".join(w.capitalize() for w in _norm_space(s).split())
-def _format_rm_dots(rm):
+def format_rm(rm):
     d = re.sub(r"\D","", rm or "")
     if not d: return ""
-    if len(d)==6: parts=[d[0:2],d[2:4],d[4:6]]
-    elif len(d)==7: parts=[d[0:1],d[1:3],d[3:5],d[5:7]]
+    if len(d)==6: parts=[d[:2],d[2:4],d[4:6]]
+    elif len(d)==7: parts=[d[:1],d[1:3],d[3:5],d[5:7]]
     else: parts=[d[i:i+2] for i in range(0,len(d),2)]
     return ".".join([p for p in parts if p])
 
-def _format_date_ddmmyyyy(s):
-    s = (s or "").strip()
+def format_date_ddmmyyyy(s):
     if not s: return ""
     try:
-        # terima "2004-09-04" atau "04-09-2004" dst
-        dt = dtparser.parse(s, dayfirst=False, fuzzy=True)
+        dt = dtparser.parse(s, fuzzy=True, dayfirst=False)
         return dt.strftime("%d/%m/%Y")
     except Exception:
-        m = re.search(r"(\d{2})[-/.](\d{2})[-/.](\d{4})", s)
-        if m: return f"{m.group(1)}/{m.group(2)}/{m.group(3)}"
-        m = re.search(r"(\d{4})[-/.](\d{2})[-/.](\d{2})", s)
-        if m: return f"{m.group(3)}/{m.group(2)}/{m.group(1)}"
         return s
 
-def _split_tindakan(text):
-    # pecah berdasarkan bullet/dash/koma/baris
-    t = (text or "").replace("•","\n").replace("·","\n")
-    t = re.sub(r"\s*[-–]\s*","\n",t)
+# ====== diagnosis & plan splitter (pintar) ======
+def split_diag(ai_text: str):
+    s = " ".join((ai_text or "").split())
+    out = []
+    m = re.search(r'(?i)\bimpaksi\b\s*([0-9]{2}(?:\s*,\s*[0-9]{2})+|[0-9]{2})', s)
+    if m: out.append(f"Impaksi gigi {m.group(1).replace(' ', '')}")
+    m = re.search(r'(?i)\bperikoronitis\b\s*([0-9]{2}(?:\s*,\s*[0-9]{2})+|[0-9]{2})', s)
+    if m: out.append(f"Perikoronitis gigi {m.group(1).replace(' ', '')}")
+    if out: return out
+    # fallback (pisah koma/semicolon)
+    parts = [p.strip() for p in re.split(r"[;,]\s*", s) if p.strip()]
+    return [p[0].upper()+p[1:] if len(p)>1 else p.upper() for p in parts]
+
+def split_plan(plan_text: str, instr_text: str = ""):
+    t = " ; ".join([plan_text or "", instr_text or ""])
+    # pecah di transisi ke "Pro ..."
+    t = re.sub(r"\s+(?=Pro\s)", "\n", t, flags=re.I)
+    t = t.replace("•","\n").replace("·","\n")
+    t = re.sub(r"\s*[-–]\s*","\n", t)
     t = t.replace(",", "\n")
     rows = [re.sub(r"\s+"," ", r).strip(" .") for r in t.splitlines()]
     rows = [r for r in rows if r and not r.lower().startswith(("instruksi","evaluasi"))]
-    # normalisasi istilah lazim
-    rep = {r"\bopg\b":"OPG X-ray", r"\bkonsultasi\b":"Konsultasi", r"\bkonsul\b":"Konsul interna"}
+    rep = {r"\bopg\b":"OPG X-ray", r"\bperiapikal\b":"Periapikal X-ray", r"\bkonsul\b":"Konsul interna", r"\bkonsultasi\b":"Konsultasi"}
     out, seen = [], set()
     for r in rows:
         x = r
         for k,v in rep.items(): x = re.sub(k, v, x, flags=re.I)
         kx = x.lower()
         if kx not in seen:
-            out.append(x)
-            seen.add(kx)
+            out.append(x); seen.add(kx)
     return out
 
-def _pick_kontrol(items):
-    for it in items:
-        if it.lower().startswith(("pro ","pro-","pro")):
-            return it
-    return items[0] if items else ""
+# ====== DPJP mapper ======
+def map_dpjp(doctor: str) -> str:
+    key = doctor.lower()
+    if re.search(r"yossy|yoanita|ariestiana", key): return "drg. Yossy Yoanita Ariestiana, M.KG., Sp.B.M.M., Subsp.Ortognat-D(K)."
+    if "ruslin" in key:   return "Prof. drg. Muhammad Ruslin, M.Kes., Ph.D., Sp.B.M.M., Subsp. Orthognat-D (K)"
+    if "gazali" in key:   return "drg. Mohammad Gazali, MARS., Sp.B.M.M., Subsp.T.M.T.M.J(K)"
+    if "carolina" in key or "stevanie" in key: return "drg. Carolina Stevanie, Sp.B.M.M."
+    return ""
 
-def _map_dpjp(raw):
-    key = re.sub(r"[^a-z]","", (raw or "").lower())
-    for k,v in DPJP_MAP.items():
-        if k in key:
-            return v
-    # fallback: jika string sudah cocok salah satu canonical
-    for v in DPJP_CANON:
-        if re.sub(r"[^a-z]","", v.lower()) in key or key in re.sub(r"[^a-z]","", v.lower()):
-            return v
-    return raw or ""
-
-def parse_simrs_html_to_review(html_text, dpjp_override=None, operator=""):
+# ====== parser HTML (fix 7 kolom CPPT) ======
+def parse_html_record(html_text: str):
     soup = BeautifulSoup(html_text, "html.parser")
 
-    # --- HEADER PASIEN (tabel pertama: No.RM, Nama Pasien, Tempat & Tanggal Lahir, Nomor Telepon)
-    header_table = soup.select_one("table.tbl_form")
-    rm = nama = tgl_lahir = telp = ""
-    if header_table:
-        for tr in header_table.select("tr.isi"):
+    # header biodata
+    nama = rm = tgl = tel = ""
+    header = soup.select_one("table.tbl_form")
+    if header:
+        for tr in header.select("tr.isi"):
             tds = tr.find_all("td")
             if len(tds) >= 3:
-                label = _norm_space(tds[0].get_text())
-                val   = _norm_space(tds[2].get_text())
+                label = re.sub(r"\s+"," ", tds[0].get_text(strip=True))
+                val   = tds[2].get_text(" ", strip=True)
                 if re.search(r"No\.?\s*RM", label, re.I): rm = val
-                elif re.search(r"Nama\s*Pasien", label, re.I): nama = val
+                elif re.search(r"Nama\s*Pasien", label, re.I): nama = val.title()
                 elif re.search(r"Tempat.*Tanggal\s*Lahir", label, re.I):
-                    # format: "PAREPARE 2004-09-04" atau "- 2004-09-04"
                     m = re.search(r"(\d{4}[-/]\d{2}[-/]\d{2}|\d{2}[-/]\d{2}[-/]\d{4})", val)
-                    if m: tgl_lahir = m.group(1)
+                    if m: tgl = m.group(1)
                 elif re.search(r"Nomor\s*Telepon", label, re.I):
-                    telp = re.search(r"(08\d{8,13})", val or "") and re.search(r"(08\d{8,13})", val).group(1) or val
-    # Contoh struktur header sesuai HTML SIMRS yang kamu upload.  [oai_citation:3‡SYAMSIAH.html](sediment://file_0000000019d0720da5492cf7ccec6df4)
+                    mt = re.search(r"(08\d{8,13})", val)
+                    tel = mt.group(1) if mt else val
 
-    # --- CPPT TERBARU (cari semua nested table CPPT; pilih baris Tanggal terbaru)
-    # Pola: ada baris header kolom "Tanggal | Dokter/Paramedis | Subjek/Asesmen | Objek/Diagnosis | Asesmen/Intervensi | Plan/Monitoring | ..."
-    # Lalu baris data dengan Tanggal berbentuk "YYYY-MM-DD<br>HH:MM:SS"
-    cppt_rows = []
-    for big_tbl in soup.select("table.tbl_form"):
-        inner = big_tbl.select("table")
-        for t in inner:
-            # cari baris data yang punya 8 kolom (seperti CPPT)
-            for tr in t.select("tr.isi"):
-                tds = tr.find_all("td")
-                if len(tds) == 8:
-                    tanggal_html = tds[0].decode_contents()
-                    # Ambil tanggal & jam (pakai last if multi)
-                    dts = re.findall(r"(\d{4}-\d{2}-\d{2})", tanggal_html)
-                    hms = re.findall(r"(\d{2}:\d{2}:\d{2})", tanggal_html)
-                    if dts:
-                        dt_str = dts[-1] + (" " + hms[-1] if hms else " 00:00:00")
-                        try:
-                            dt_obj = dtparser.parse(dt_str)
-                        except Exception:
-                            continue
-                        row = {
-                            "dt": dt_obj,
-                            "dokter": _norm_space(tds[1].get_text()),
-                            "subjek": _norm_space(tds[2].get_text(separator=" ")),
-                            "objek_diagnosis": _norm_space(tds[3].get_text(separator=" ")),
-                            "asesmen_intervensi": _norm_space(tds[4].get_text(separator=" ")),
-                            "plan": _norm_space(tds[5].get_text(separator=" ")),
-                            "instruksi": _norm_space(tds[6].get_text(separator=" ")),
-                            "eval": _norm_space(tds[7].get_text(separator=" ")),
-                        }
-                        cppt_rows.append(row)
-    # Struktur kolom CPPT terlihat jelas pada file-file kamu.  [oai_citation:4‡PRISCYLIA.html](sediment://file_0000000046fc720a894780acdabf2568)  [oai_citation:5‡NIA.html](sediment://file_00000000b9a4722fb5bb30ffdb814beb)
+    # inner CPPT table (7 kolom)
+    inner = None
+    for t in soup.select("table.tbl_form table"):
+        if "Tanggal" in t.text and "Plan/Monitoring" in t.text:
+            inner = t; break
 
-    latest = max(cppt_rows, key=lambda r: r["dt"]) if cppt_rows else None
+    latest = None
+    if inner:
+        rows = inner.find_all("tr", class_="isi")
+        if len(rows) >= 2:
+            data = rows[1].find_all("td")
+            # mapping 7 kolom
+            if len(data) >= 6:
+                dt   = data[0].get_text(" ", strip=True)
+                doc  = data[1].get_text(" ", strip=True)
+                ai   = data[4].get_text(" ", strip=True)
+                plan = data[5].get_text(" ", strip=True)
+                instr= data[6].get_text(" ", strip=True) if len(data)>=7 else ""
+                latest = {"dt": dt, "doctor": doc, "ai": ai, "plan": plan, "instr": instr}
 
-    # --- BANGUN FIELD REVIEW
-    nama = _title_case_keep(nama)
-    tgl_fmt = _format_date_ddmmyyyy(tgl_lahir)
-    rm_dots = _format_rm_dots(rm)
+    return {"nama": nama, "rm": rm, "tgl": tgl, "tel": tel, "cppt": latest}
 
-    diagnosa = ""
-    tindakan_text = ""
-    if latest:
-        # Paling aman: ambil “Objek/Diagnosis” sebagai Diagnosa utama kalau mengandung istilah kunci,
-        # jika tidak, fallback ke “Asesmen/Intervensi”
-        diag_cand = latest["objek_diagnosis"] or ""
-        if not re.search(r"(tumor|malignan|malignant|gangren|impak|karies|osteosarcom|carcinoma|odontogenic|odontektomi)", diag_cand, re.I):
-            diag_cand = latest["asesmen_intervensi"]
-        diagnosa = diag_cand
+# ====== derive & build one review (EXACT spacing) ======
+def build_review(rec, operator: str, index_no: int):
+    nama = rec.get("nama","")
+    rm   = format_rm(rec.get("rm",""))
+    tgl  = format_date_ddmmyyyy(rec.get("tgl",""))
+    tel  = rec.get("tel","")
 
-        # Tindakan = dari Plan/Monitoring (ditambah baris dari Instruksi bila relevan)
-        tindakan_text = "\n".join([latest["plan"], latest["instruksi"]]).strip()
-    else:
-        diagnosa = ""
-        tindakan_text = ""
+    cppt = rec.get("cppt") or {}
+    dpjp = map_dpjp(cppt.get("doctor",""))
+    diag_items = split_diag(cppt.get("ai",""))
+    plan_items = split_plan(cppt.get("plan",""), cppt.get("instr",""))
 
-    tindakan_items = _split_tindakan(tindakan_text)
-    kontrol = _pick_kontrol(tindakan_items)
+    tindakan = [x for x in plan_items if not re.match(r"(?i)pro\b", x)]
+    kontrols = []
+    for it in plan_items:
+        if re.match(r"(?i)pro\b", it):
+            m = re.search(r"(?i)pro\s+odontektomi(?:\s+gigi)?\s*(\d{2})", it)
+            if m:
+                kontrols.append(f"Pro Odontektomi gigi {m.group(1)} dalam lokal anestesi")
+            else:
+                kontrols.append(it)
 
-    # DPJP: deteksi dari kolom Dokter/Paramedis di entri terbaru, lalu mapping
-    dpjp_raw = latest["dokter"] if latest else ""
-    dpjp = _map_dpjp(dpjp_raw)
-    if dpjp_override:
-        dpjp = dpjp_override
+    # tambah Konsultasi bila ada X-ray di tindakan
+    if any(re.search(r"(?i)x[- ]?ray|opg|periapikal", x) for x in tindakan):
+        if all("konsultasi" not in x.lower() for x in tindakan):
+            tindakan.insert(0, "Konsultasi")
 
-    # --- FORMAT OUTPUT SESUAI TEMPLATE-MU
+    ctrl = next((k for k in kontrols if "odontektomi" in k.lower()), kontrols[0] if kontrols else "")
+
     lines = []
-    lines.append(f"Nama            : {nama}")
-    lines.append(f"• Tanggal Lahir  : {tgl_fmt}")
-    lines.append(f"• RM             : {rm_dots}")
-    lines.append(f"• Diagnosa       : {diagnosa}")
-    if len(tindakan_items) <= 1:
-        lines.append(f"• Tindakan        : {tindakan_items[0] if tindakan_items else ''}")
+    lines.append(f"{index_no}. {fmt_main('Nama', nama)}")
+    lines.append(fmt_bullet("Tanggal Lahir", tgl))
+    lines.append(fmt_bullet("RM", rm))
+    lines.append(fmt_head("Diagnosa"))
+    for d in diag_items:
+        lines.append(f"    * {d}")
+    if len(tindakan) <= 1:
+        lines.append(fmt_bullet("Tindakan", tindakan[0] if tindakan else ""))
     else:
-        lines.append("• Tindakan        :")
-        for t in tindakan_items:
+        lines.append(fmt_head("Tindakan"))
+        for t in tindakan:
             lines.append(f"    * {t}")
-    lines.append(f"• Kontrol        : {kontrol}")
-    lines.append(f"• DPJP           : {dpjp}")
-    # Telp dari header pasien (tabel biodata)
-    lines.append(f"• No. Telp.      : {telp}")
-    # Operator kamu isi di UI, jadi tinggal masukkan lewat argumen
-    lines.append(f"• Operator       : {operator}")
-
+    lines.append(fmt_bullet("Kontrol", ctrl))
+    lines.append(fmt_bullet("DPJP", dpjp))
+    lines.append(fmt_bullet("No. Telp.", tel))
+    lines.append(fmt_bullet("Operator", operator or ""))
     return "\n".join(lines)
