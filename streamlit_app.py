@@ -1,15 +1,16 @@
 import re
 from typing import List, Dict, Any
+from datetime import date, timedelta
 import streamlit as st
 from bs4 import BeautifulSoup
 from dateutil import parser as dtparser
-from datetime import date
 
-# =============== FORMAT (persis contoh) ===============
-LABEL_COL = 15
-def fmt_main(label, val):   return f"{label:<{LABEL_COL}} : {val}".rstrip()
-def fmt_bullet(label, val): return f"• {label:<{LABEL_COL}} : {val}".rstrip()
-def fmt_head(label):        return f"• {label:<{LABEL_COL}} :"
+# ============== FORMAT (kolon & spasi rata) ==============
+# Atur lebar label agar ":" sejajar. Kalau mau lebih rapat/longgar, ganti nilainya.
+LABEL_COL = 18
+def fmt_main(label, val):   return f"{label:<{LABEL_COL}}: {val}".rstrip()
+def fmt_bullet(label, val): return f"• {label:<{LABEL_COL}}: {val}".rstrip()
+def fmt_head(label):        return f"• {label:<{LABEL_COL}}:"
 
 def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
@@ -30,34 +31,71 @@ def format_date_ddmmyyyy(s: str) -> str:
     except Exception:
         return s
 
-# =============== DPJP mapping (4 nama) ===============
+# ============== DPJP mapping (4 nama) ==============
 def map_dpjp(doctor: str) -> str:
     key = (doctor or "").lower()
     if re.search(r"yossy|yoanita|ariestiana", key):
-        return "drg. Yossy Yoanita Ariestiana, M.KG., Sp.B.M.M., Subsp.Ortognat-D(K)."
+        return "drg. Yossy Yoanita Ariestiana, M.KG., Sp.B.M.M., Subsp.Ortognat-D(K)"
     if "ruslin" in key:
         return "Prof. drg. Muhammad Ruslin, M.Kes., Ph.D., Sp.B.M.M., Subsp. Orthognat-D (K)"
     if "gazali" in key:
         return "drg. Mohammad Gazali, MARS., Sp.B.M.M., Subsp.T.M.T.M.J(K)"
     if "carolina" in key or "stevanie" in key:
-        return "drg. Carolina Stevanie, Sp.B.M.M."
+        return "drg. Carolina Stevanie, Sp.B.M.M"
     return ""
 
-# =============== DIAGNOSA (gabung potongan) ===============
-def _append_tooth_numbers(base: str, extra_nums: List[str]) -> str:
+# ============== DIAGNOSA (gabung potongan, 1 item = inline) ==============
+def _append_tooth_numbers(base: str, extras: List[str]) -> str:
     base = base.rstrip(" ,;")
-    return f"{base}, {', '.join(extra_nums)}"
+    return f"{base}, {', '.join(extras)}"
+
+def _merge_impaksi_perikoronitis(items: List[str]) -> List[str]:
+    """
+    Perbaiki pola: ["Impaksi 18, 28, 38", "48, perikoronitis 38"] ->
+                   ["Impaksi 18, 28, 38, 48", "Perikoronitis 38"]
+    """
+    if not items: return items
+    out = []
+    i = 0
+    while i < len(items):
+        cur = items[i]
+        nxt = items[i+1] if i+1 < len(items) else ""
+        # kalau next dimulai angka gigi lalu ada 'perikoronitis' -> gabung
+        if nxt and re.match(r"^\d{2}", nxt) and re.search(r"(?i)\bperikoronitis\b", nxt):
+            # tambah angka dari awal next ke cur bila cur mengandung impaksi
+            if re.search(r"(?i)\bimpaksi\b", cur):
+                # ambil leading angka di next (mis. "48, perikoronitis 38")
+                lead_nums = re.findall(r"^\d{2}", nxt)
+                if lead_nums:
+                    # sisipkan ke cur
+                    if re.search(r",\s*\d{2}\s*$", cur):
+                        cur = cur + ", " + lead_nums[0]
+                    else:
+                        m = re.search(r"(Impaksi(?:\s*gigi)?\s*)(.*)", cur, flags=re.I)
+                        if m:
+                            cur = m.group(1) + (m.group(2)+", " + lead_nums[0]).strip()
+            # ganti next menjadi hanya "Perikoronitis ..."
+            nxt_fixed = re.sub(r"^\d{2}\s*,\s*", "", nxt).strip()
+            out.append(cur)
+            out.append(nxt_fixed[0].upper()+nxt_fixed[1:] if len(nxt_fixed)>1 else nxt_fixed.upper())
+            i += 2
+            continue
+        out.append(cur)
+        i += 1
+    return out
 
 def split_diag(ai_text: str) -> List[str]:
     """
     - Jangan pecah di 'ai'
-    - Gabungkan angka gigi yang nyasar (mis. '27') ke item sebelumnya
-    - 1 item total nanti ditampilkan inline
+    - Pisah di ';' atau '-' panjang; koma hanya memisah jika diikuti huruf besar/angka (kalimat baru)
+    - Gabungkan angka gigi yang 'nyasar' (baris '27' dsb) ke item sebelumnya
+    - Perbaiki pola impaksi/perikoronitis seperti contoh user
     """
     t = _clean(ai_text)
-    raw = re.split(r"[;/]\s*", t)
+    # pecah kasar
+    raw = re.split(r"[;/–—]\s*", t)  # ; atau dash
     if len(raw) == 1:
-        raw = re.split(r",\s*(?=[A-Z0-9])", t)
+        raw = re.split(r",\s*(?=[A-Z0-9])", t)  # koma diikuti huruf besar/angka = item baru
 
     items = []
     for ch in raw:
@@ -67,37 +105,40 @@ def split_diag(ai_text: str) -> List[str]:
     if not items:
         return []
 
-    merged, pending_nums = [], []
+    # gabung angka gigi yang nyasar
+    merged, pending = [], []
     for it in items:
-        if re.fullmatch(r"\d{2}", it):  # baris cuma "17"/"27"
-            pending_nums.append(it); continue
-        if merged and pending_nums:
-            merged[-1] = _append_tooth_numbers(merged[-1], pending_nums)
-            pending_nums = []
+        if re.fullmatch(r"\d{2}", it):
+            pending.append(it); continue
+        if merged and pending:
+            merged[-1] = _append_tooth_numbers(merged[-1], pending); pending=[]
         merged.append(_clean(it))
-    if pending_nums and merged:
-        merged[-1] = _append_tooth_numbers(merged[-1], pending_nums)
+    if pending and merged:
+        merged[-1] = _append_tooth_numbers(merged[-1], pending)
 
+    merged = _merge_impaksi_perikoronitis(merged)
+
+    # Satu baris khusus: format impaksi detail tetap 1 item (jangan dipecah lagi)
+    # (sudah dipenuhi karena kita tidak memecah di 'ai' dan hanya split di ;/-)
     return merged
 
-# =============== PLAN → TINDAKAN/KONTROL ===============
+# ============== PLAN → TINDAKAN/KONTROL (Plan only!) ==============
 EXCLUDE_NOT_ACTION = re.compile(
-    r"(?i)\b(Resep|Jumlah|Aturan\s*Pakai|SPOIT|SYRINGE|TAB|CAPS|MG|AMPUL|ECOSORB|ECOSOL|PISAU|INF|IV|INFUS|OBAT|Jangan|Diet\b|Jaga\b)\b"
+    r"(?i)\b(Resep|Jumlah|Aturan\s*Pakai|SPOIT|SYRINGE|TAB|CAPS|MG|AMPUL|ECOSORB|ECOSOL|PISAU|INF|IV|INFUS|OBAT|Jangan|Diet\b|Jaga\b|post operasi)\b"
 )
 
-def split_plan(plan_text: str, instr_text: str = "") -> List[str]:
+def split_plan_only(plan_text: str) -> List[str]:
     """
+    Ambil tindakan dari PLAN saja (bukan instruksi).
     - Pisah 'OPG Pro ...' yang nempel
-    - Buang resep/alat/edukasi
-    - Normalisasi istilah
-    - Tambah 'Cuci luka …' bila ada 'Aff hecting'
+    - Buang resep/alat/edukasi/diet/jangan/post operasi
+    - Normalisasi istilah dan tindakan utama
     """
-    t = " ; ".join([plan_text or "", instr_text or ""])
-    t = re.sub(r"\s+(?=Pro\s)", "\n", t, flags=re.I)
+    t = _clean(plan_text)
+    t = re.sub(r"\s+(?=Pro\s)", "\n", t, flags=re.I)  # pisah sebelum "Pro ..."
     t = t.replace("•", "\n").replace("·", "\n")
-    t = re.sub(r"\s*[-–]\s*", "\n", t)
+    t = re.sub(r"\s*[-–—]\s*", "\n", t)
     t = t.replace(",", "\n")
-
     rows = [re.sub(r"\s+", " ", r).strip(" .;") for r in t.splitlines()]
     rows = [r for r in rows if r]
 
@@ -109,16 +150,15 @@ def split_plan(plan_text: str, instr_text: str = "") -> List[str]:
         x = re.sub(r"\bkonsul\b", "Konsul interna", x, flags=re.I)
         x = re.sub(r"\bkonsultasi\b", "Konsultasi", x, flags=re.I)
         x = _clean(x)
-        if not x or EXCLUDE_NOT_ACTION.search(x):  # buang non tindakan
+        if not x or EXCLUDE_NOT_ACTION.search(x):
             continue
 
-        # Normalisasi tindakan utama → “... gigi NN dalam lokal anestesi”
+        # Normalisasi: pastikan format ... gigi NN dalam lokal anestesi
         m = re.search(r"(?i)\bodontektomi\b(?:\s+gigi)?\s*(\d{2})", x)
         if m: x = f"Odontektomi gigi {m.group(1)} dalam lokal anestesi"
         m = re.search(r"(?i)\bekstrak[si]\w*\b(?:\s+gigi)?\s*(\d{2})", x)
         if m: x = f"Ekstraksi gigi {m.group(1)} dalam lokal anestesi"
 
-        # hapus sisa "Resep: ..."
         x = re.sub(r"(?i)\bResep\b.*", "", x).strip(" ;")
         if x and x not in normed:
             normed.append(x)
@@ -130,9 +170,9 @@ def split_plan(plan_text: str, instr_text: str = "") -> List[str]:
 
     return normed
 
-def derive_sections(ai_text: str, plan_text: str, instr_text: str):
+def derive_sections(ai_text: str, plan_text: str):
     diag_items = split_diag(ai_text)
-    plan_items = split_plan(plan_text, instr_text)
+    plan_items = split_plan_only(plan_text)
 
     tindakan = [x for x in plan_items if not re.match(r"(?i)pro\b", x)]
     pro_items = [x for x in plan_items if re.match(r"(?i)pro\b", x)]
@@ -140,23 +180,23 @@ def derive_sections(ai_text: str, plan_text: str, instr_text: str):
     # default kontrol dari "Pro ..."
     kontrol_default = ""
     if pro_items:
-        m = None
+        # Prioritas odontektomi
+        got = None
         for it in pro_items:
             m = re.search(r"(?i)pro\s+odontektomi(?:\s+gigi)?\s*(\d{2})", it)
             if m: 
-                kontrol_default = f"Pro Odontektomi gigi {m.group(1)} dalam lokal anestesi"; break
-        if not kontrol_default:
-            kontrol_default = pro_items[0]
+                got = f"Pro Odontektomi gigi {m.group(1)} dalam lokal anestesi"; break
+        kontrol_default = got or pro_items[0]
 
     # tambah Konsultasi kalau ada X-ray
     if any(re.search(r"(?i)x[- ]?ray|opg|periapikal", x) for x in tindakan):
         if all("konsultasi" not in x.lower() for x in tindakan):
             tindakan.insert(0, "Konsultasi")
 
-    tindakan_is_single = len(tindakan) <= 1
-    return diag_items, tindakan, tindakan_is_single, kontrol_default
+    single_tindakan = (len(tindakan) <= 1)
+    return diag_items, tindakan, single_tindakan, kontrol_default
 
-# =============== PARSE HTML (pilih baris di TANGGAL TARGET) ===============
+# ============== PARSE HTML (ambil hanya baris di TANGGAL TARGET) ==============
 def parse_html_record_for_date(html_text: str, target: date) -> Dict[str, Any]:
     soup = BeautifulSoup(html_text, "lxml")
 
@@ -178,7 +218,7 @@ def parse_html_record_for_date(html_text: str, target: date) -> Dict[str, Any]:
                     mt = re.search(r"(08\d{8,13})", val)
                     tel = mt.group(1) if mt else val
 
-    # cari tabel CPPT dan kumpulkan baris yang **tanggalnya = target**
+    # cari tabel CPPT dan pilih baris pada tanggal target (ambil jam paling akhir)
     chosen = None
     for t in soup.select("table.tbl_form table"):
         txt = t.get_text(" ", strip=True)
@@ -201,15 +241,32 @@ def parse_html_record_for_date(html_text: str, target: date) -> Dict[str, Any]:
                 "doctor": tds[1].get_text(" ", strip=True) if len(tds) > 1 else "",
                 "ai":     tds[4].get_text(" ", strip=True) if len(tds) > 4 else "",
                 "plan":   tds[5].get_text(" ", strip=True) if len(tds) > 5 else "",
-                "instr":  tds[6].get_text(" ", strip=True) if len(tds) > 6 else "",
             }
             if (chosen is None) or (row["dt"] > chosen["dt"]):
                 chosen = row
 
     return {"nama": nama, "rm": rm, "tgl": tgl, "tel": tel, "cppt": chosen}
 
-# =============== BUILD REVIEW (termasuk RULE KONTROL BARU) ===============
-def build_review(rec: Dict[str, Any], operator: str, index_no: int) -> str:
+# ============== KONTROL (aturan barumu) ==============
+def compute_kontrol(diag_items: List[str], tindakan: List[str], default_kontrol: str, when: date) -> str:
+    # 1) jika tindakan mengandung Ekstraksi / Odontektomi → POD VII
+    if any(re.search(r"(?i)\b(Ekstraksi|Odontektomi)\b", t) for t in tindakan):
+        return "POD VII"
+
+    # 2) jika diagnosa mengandung POD VII → '-'
+    if any(re.search(r"(?i)\bPOD\s*VII\b", d) for d in diag_items):
+        # bonus: kalau mengandung hemimandibulektomi/rekonstruksi → POD X (kamis,dd/mm/yyyy)
+        if any(re.search(r"(?i)(hemimandibulektomi|rekonstruksi)", d) for d in diag_items):
+            dtx = when + timedelta(days=3)
+            hari = ["senin","selasa","rabu","kamis","jumat","sabtu","minggu"][dtx.weekday()]
+            return f"POD X ({hari},{dtx.strftime('%d/%m/%Y')})"
+        return "-"
+
+    # 3) fallback: dari Pro ...
+    return default_kontrol or "-"
+
+# ============== BUILD REVIEW (format persis) ==============
+def build_review(rec: Dict[str, Any], operator: str, index_no: int, target_day: date) -> str:
     nama = rec.get("nama", "")
     rm   = format_rm(rec.get("rm", ""))
     tgl  = format_date_ddmmyyyy(rec.get("tgl", ""))
@@ -217,28 +274,15 @@ def build_review(rec: Dict[str, Any], operator: str, index_no: int) -> str:
     cppt = rec.get("cppt") or {}
 
     dpjp = map_dpjp(cppt.get("doctor", ""))
-
-    diag_items, tindakan, tindakan_is_single, kontrol_default = derive_sections(
-        cppt.get("ai", ""), cppt.get("plan", ""), cppt.get("instr", "")
+    diag_items, tindakan, single_tindakan, kontrol_default = derive_sections(
+        cppt.get("ai", ""), cppt.get("plan", "")
     )
+    kontrol_val = compute_kontrol(diag_items, tindakan, kontrol_default, target_day)
 
-    # ---- RULE KONTROL BARU ----
-    # 1) Jika tindakan mengandung Ekstraksi/Odontektomi hari itu → Kontrol = POD VII
-    tindakan_main = next((t for t in tindakan if re.search(r"(?i)\b(Ekstraksi|Odontektomi)\b", t)), None)
-    # 2) Jika diagnosa mengandung 'POD VII' → Kontrol = '-'
-    is_pod7_case = any(re.search(r"(?i)\bPOD\s*VII\b", d) for d in diag_items)
-
-    if tindakan_main:
-        kontrol_val = "POD VII"
-    elif is_pod7_case:
-        kontrol_val = "-"
-    else:
-        kontrol_val = kontrol_default  # fallback dari "Pro ...", kalau ada
-
-    # ---- CETAK ----
     lines = []
     lines.append(f"{index_no}. {fmt_main('Nama', nama)}")
-    lines.append(fmt_bullet("Tanggal Lahir", tgl))
+    # label sesuai contohmu (kapitalisasi “Tanggal lahir” kecil)
+    lines.append(fmt_bullet("Tanggal lahir", tgl))
     lines.append(fmt_bullet("RM", rm))
 
     # Diagnosa: 1 item inline, >1 bullets
@@ -249,22 +293,22 @@ def build_review(rec: Dict[str, Any], operator: str, index_no: int) -> str:
         for d in diag_items:
             lines.append(f"    * {d}")
 
-    # Tindakan: 1 item inline, >1 bullets
-    if tindakan_is_single:
+    # Tindakan: dari PLAN saja
+    if single_tindakan:
         lines.append(fmt_bullet("Tindakan", tindakan[0] if tindakan else ""))
     else:
         lines.append(fmt_head("Tindakan"))
         for t in tindakan:
             lines.append(f"    * {t}")
 
-    lines.append(fmt_bullet("Kontrol", kontrol_val or ""))
+    lines.append(fmt_bullet("Kontrol", kontrol_val))
     lines.append(fmt_bullet("DPJP", dpjp))
     lines.append(fmt_bullet("No. Telp.", tel))
     lines.append(fmt_bullet("Operator", operator or ""))
 
     return "\n".join(lines)
 
-# =============== STREAMLIT UI ===============
+# ============== STREAMLIT UI ==============
 st.set_page_config(page_title="RSPTN Review (HTML + Tanggal)", page_icon="🩺", layout="centered")
 st.title("🩺 RSPTN Review Generator — HTML (filter per tanggal)")
 
@@ -284,7 +328,7 @@ if uploaded_files:
     for f in uploaded_files:
         html = f.read().decode("utf-8", errors="ignore")
         rec = parse_html_record_for_date(html, target=target_date)
-        if rec.get("cppt"):  # hanya yang punya baris pada tanggal target
+        if rec.get("cppt"):     # hanya pasien yang punya CPPT pada tanggal target
             records.append(rec)
 
     if not records:
@@ -292,7 +336,7 @@ if uploaded_files:
     else:
         # urutkan ASC by jam pada tanggal target
         records.sort(key=lambda r: r["cppt"]["dt"])
-        outputs = [build_review(r, operator_all, i) for i, r in enumerate(records, start=1)]
+        outputs = [build_review(r, operator_all, i, target_date) for i, r in enumerate(records, start=1)]
         final_text = "\n\n".join(outputs)
 
         st.success("✅ Review selesai.")
