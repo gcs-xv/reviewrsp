@@ -5,30 +5,21 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from dateutil import parser as dtparser
 
-# ============== FORMAT (kolon & spasi rata) ==============
-LABEL_COL = 18
-
- # gunakan EM SPACE untuk alignment WA
-EM = "\u2003"
-
-def _wa_pad(label: str, width: int) -> str:
-    # hitung selisih
-    diff = width - len(label)
-    if diff < 1:
-        return label
-    return label + (EM * diff)
+# ============== FORMAT (kolon & spasi rata, cocok untuk copas ke WA) ==============
+# Lebar kolom label; kalau mau colonnya lebih ke kanan, boleh ganti mis. 20 atau 22.
+LABEL_COL = 20
 
 def fmt_main(label, val):
-    pad = _wa_pad(label, LABEL_COL)
-    return f"{pad} : {val}".rstrip()
+    # Pad label dengan spasi biasa supaya kira-kira sejajar di kebanyakan aplikasi (WA, Notes, dll).
+    return f"{label:<{LABEL_COL}} : {val}".rstrip()
 
 def fmt_bullet(label, val):
-    pad = _wa_pad(label, LABEL_COL)
-    return f"• {pad} : {val}".rstrip()
+    # Versi bullet dengan padding label yang sama.
+    return f"• {label:<{LABEL_COL}} : {val}".rstrip()
 
 def fmt_head(label):
-    pad = _wa_pad(label, LABEL_COL)
-    return f"• {pad} :"
+    # Header untuk bagian multi-item (Diagnosa:, Tindakan:)
+    return f"• {label:<{LABEL_COL}} :"
 
 def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
