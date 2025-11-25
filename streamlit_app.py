@@ -7,20 +7,17 @@ from dateutil import parser as dtparser
 
 # ============== FORMAT (kolon & spasi rata) ==============
 LABEL_COL = 18
-
 def fmt_main(label, val):
-    # Contoh: "Nama              : Andi ...."
-    return f"{label:<{LABEL_COL}} : {val}".rstrip()
+    # Simple format so it looks good when copy-pasted into WhatsApp/Notes (no column padding)
+    return f"{label} : {val}".rstrip()
 
 def fmt_bullet(label, val):
-    # Supaya titik dua di bullet sejajar dengan yang tanpa bullet,
-    # label di sini dibuat sedikit lebih pendek (LABEL_COL - 2) karena ada "• "
-    inner_width = max(LABEL_COL - 2, 1)
-    return f"• {label:<{inner_width}} : {val}".rstrip()
+    # Bullet version without padding; will look consistent in proportional fonts
+    return f"• {label} : {val}".rstrip()
 
 def fmt_head(label):
-    inner_width = max(LABEL_COL - 2, 1)
-    return f"• {label:<{inner_width}} :"
+    # Header line for multi-item sections
+    return f"• {label} :"
 
 def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
@@ -60,31 +57,22 @@ def _append_tooth_numbers(base: str, extras: List[str]) -> str:
     return f"{base}, {', '.join(extras)}"
 
 def _merge_impaksi_perikoronitis(items: List[str]) -> List[str]:
-    """
-    Perbaiki pola: ["Impaksi 18, 28, 38", "48, perikoronitis 38"] ->
-                   ["Impaksi 18, 28, 38, 48", "Perikoronitis 38"]
-    """
     if not items: return items
     out = []
     i = 0
     while i < len(items):
         cur = items[i]
         nxt = items[i+1] if i+1 < len(items) else ""
-        # kalau next dimulai angka gigi lalu ada 'perikoronitis' -> gabung
         if nxt and re.match(r"^\d{2}", nxt) and re.search(r"(?i)\bperikoronitis\b", nxt):
-            # tambah angka dari awal next ke cur bila cur mengandung impaksi
             if re.search(r"(?i)\bimpaksi\b", cur):
-                # ambil leading angka di next (mis. "48, perikoronitis 38")
                 lead_nums = re.findall(r"^\d{2}", nxt)
                 if lead_nums:
-                    # sisipkan ke cur
                     if re.search(r",\s*\d{2}\s*$", cur):
                         cur = cur + ", " + lead_nums[0]
                     else:
                         m = re.search(r"(Impaksi(?:\s*gigi)?\s*)(.*)", cur, flags=re.I)
                         if m:
                             cur = m.group(1) + (m.group(2)+", " + lead_nums[0]).strip()
-            # ganti next menjadi hanya "Perikoronitis ..."
             nxt_fixed = re.sub(r"^\d{2}\s*,\s*", "", nxt).strip()
             out.append(cur)
             out.append(nxt_fixed[0].upper()+nxt_fixed[1:] if len(nxt_fixed)>1 else nxt_fixed.upper())
@@ -93,16 +81,6 @@ def _merge_impaksi_perikoronitis(items: List[str]) -> List[str]:
         out.append(cur)
         i += 1
     return out
-
-def _normalize_diag_item(txt: str) -> str:
-    """
-    Auto-correct typo umum di diagnosa:
-    - Impkasi -> Impaksi
-    (bisa ditambah lagi kalau kamu nemu typo lain)
-    """
-    x = txt
-    x = re.sub(r"(?i)\bimpkasi\b", "Impaksi", x)
-    return x
 
 def split_diag(ai_text: str) -> List[str]:
     """
@@ -118,10 +96,9 @@ def split_diag(ai_text: str) -> List[str]:
     if re.search(r"\bai\b", t, flags=re.I):
         t = re.split(r"\bai\b", t, flags=re.I)[0].strip()
 
-    # pecah kasar
-    raw = re.split(r"[;/–—]\s*", t)  # ; atau dash
+    raw = re.split(r"[;/–—]\s*", t)
     if len(raw) == 1:
-        raw = re.split(r",\s*(?=[A-Z0-9])", t)  # koma diikuti huruf besar/angka = item baru
+        raw = re.split(r",\s*(?=[A-Z0-9])", t)
 
     items = []
     for ch in raw:
@@ -131,7 +108,6 @@ def split_diag(ai_text: str) -> List[str]:
     if not items:
         return []
 
-    # gabung angka gigi yang nyasar
     merged, pending = [], []
     for it in items:
         if re.fullmatch(r"\d{2}", it):
@@ -143,10 +119,6 @@ def split_diag(ai_text: str) -> List[str]:
         merged[-1] = _append_tooth_numbers(merged[-1], pending)
 
     merged = _merge_impaksi_perikoronitis(merged)
-
-    # auto-correct typo diagnosa (Impkasi -> Impaksi)
-    merged = [_normalize_diag_item(m) for m in merged]
-
     return merged
 
 # ============== PLAN → TINDAKAN/KONTROL (Plan only!) ==============
@@ -155,16 +127,8 @@ EXCLUDE_NOT_ACTION = re.compile(
 )
 
 def split_plan_only(plan_text: str) -> List[str]:
-    """
-    Ambil tindakan dari PLAN saja (bukan instruksi).
-    - Pisah 'OPG Pro ...' yang nempel
-    - Buang resep/alat/edukasi/diet/jangan/post operasi
-    - Normalisasi istilah dan tindakan utama
-    - Pecah gabungan: "Konsultasi OPG X-ray ..." → Konsultasi + OPG X-ray
-      dan "Lab darah Thorax xray MRI (...)" → Lab darah + Thorax xray + MRI
-    """
     t = _clean(plan_text)
-    t = re.sub(r"\s+(?=Pro\s)", "\n", t, flags=re.I)  # pisah sebelum "Pro ..."
+    t = re.sub(r"\s+(?=Pro\s)", "\n", t, flags=re.I)
     t = t.replace("•", "\n").replace("·", "\n")
     t = re.sub(r"\s*[-–—]\s*", "\n", t)
     t = t.replace(",", "\n")
@@ -182,7 +146,6 @@ def split_plan_only(plan_text: str) -> List[str]:
         if not x or EXCLUDE_NOT_ACTION.search(x):
             continue
 
-        # Normalisasi: pastikan format ... gigi NN dalam lokal anestesi
         m = re.search(r"(?i)\bodontektomi\b(?:\s+gigi)?\s*(\d{2})", x)
         if m: x = f"Odontektomi gigi {m.group(1)} dalam lokal anestesi"
         m = re.search(r"(?i)\bekstrak[si]\w*\b(?:\s+gigi)?\s*(\d{2})", x)
@@ -192,46 +155,11 @@ def split_plan_only(plan_text: str) -> List[str]:
         if x and x not in normed:
             normed.append(x)
 
-    # ===== PEMECAHAN TINDAKAN GABUNGAN =====
-    expanded: List[str] = []
-    seen = set()
-    for x in normed:
-        l = x.lower()
-        split_done = False
+    if any(re.search(r"(?i)\baff?\s*hecting\b|\bhecting\b", s) for s in normed):
+        if not any(re.search(r"(?i)\bcuci luka\b", s) for s in normed):
+            normed.insert(0, "Cuci luka intra oral dengan NaCL 0.9%")
 
-        # Case 1: "Konsultasi OPG X-ray x ray"
-        if "konsultasi" in l and ("opg" in l or "x-ray" in l or "xray" in l or "periapikal" in l):
-            if "konsultasi" not in seen:
-                expanded.append("Konsultasi"); seen.add("konsultasi")
-            if "opg" in l or "x-ray" in l or "xray" in l:
-                if "opg x-ray" not in seen:
-                    expanded.append("OPG X-ray"); seen.add("opg x-ray")
-            if "periapikal" in l:
-                if "periapikal x-ray" not in seen:
-                    expanded.append("Periapikal X-ray"); seen.add("periapikal x-ray")
-            split_done = True
-
-        # Case 2: "Lab darah Thorax xray MRI (20/11/25)"
-        elif ("lab darah" in l) or ("thorax" in l) or ("xray" in l) or ("x-ray" in l) or ("mri" in l):
-            if "lab darah" in l and "lab darah" not in seen:
-                expanded.append("Lab darah"); seen.add("lab darah")
-            if "thorax" in l and "thorax xray" not in seen:
-                expanded.append("Thorax xray"); seen.add("thorax xray")
-            if "mri" in l and "mri" not in seen:
-                expanded.append("MRI"); seen.add("mri")
-            split_done = True
-
-        if not split_done:
-            key = x.lower()
-            if key not in seen:
-                expanded.append(x); seen.add(key)
-
-    # Aff hecting → tambahkan "Cuci luka …" bila belum ada
-    if any(re.search(r"(?i)\baff?\s*hecting\b|\bhecting\b", s) for s in expanded):
-        if not any(re.search(r"(?i)\bcuci luka\b", s) for s in expanded):
-            expanded.insert(0, "Cuci luka intra oral dengan NaCL 0.9%")
-
-    return expanded
+    return normed
 
 def derive_sections(ai_text: str, plan_text: str):
     diag_items = split_diag(ai_text)
@@ -240,18 +168,15 @@ def derive_sections(ai_text: str, plan_text: str):
     tindakan = [x for x in plan_items if not re.match(r"(?i)pro\b", x)]
     pro_items = [x for x in plan_items if re.match(r"(?i)pro\b", x)]
 
-    # default kontrol dari "Pro ..."
     kontrol_default = ""
     if pro_items:
-        # Prioritas odontektomi
         got = None
         for it in pro_items:
             m = re.search(r"(?i)pro\s+odontektomi(?:\s+gigi)?\s*(\d{2})", it)
-            if m: 
+            if m:
                 got = f"Pro Odontektomi gigi {m.group(1)} dalam lokal anestesi"; break
         kontrol_default = got or pro_items[0]
 
-    # tambah Konsultasi kalau ada X-ray
     if any(re.search(r"(?i)x[- ]?ray|opg|periapikal", x) for x in tindakan):
         if all("konsultasi" not in x.lower() for x in tindakan):
             tindakan.insert(0, "Konsultasi")
@@ -263,7 +188,6 @@ def derive_sections(ai_text: str, plan_text: str):
 def parse_html_record_for_date(html_text: str, target: date) -> Dict[str, Any]:
     soup = BeautifulSoup(html_text, "lxml")
 
-    # header biodata
     nama = rm = tgl = tel = ""
     header = soup.select_one("table.tbl_form")
     if header:
@@ -281,7 +205,6 @@ def parse_html_record_for_date(html_text: str, target: date) -> Dict[str, Any]:
                     mt = re.search(r"(08\d{8,13})", val)
                     tel = mt.group(1) if mt else val
 
-    # cari tabel CPPT dan pilih baris pada tanggal target (ambil jam paling akhir)
     chosen = None
     for t in soup.select("table.tbl_form table"):
         txt = t.get_text(" ", strip=True)
@@ -289,7 +212,7 @@ def parse_html_record_for_date(html_text: str, target: date) -> Dict[str, Any]:
             continue
         for tr in t.find_all("tr", class_="isi"):
             tds = tr.find_all("td")
-            if len(tds) < 6: 
+            if len(tds) < 6:
                 continue
             td0 = tds[0].get_text(" ", strip=True)
             d = re.search(r"(\d{4}-\d{2}-\d{2})", td0)
@@ -312,20 +235,14 @@ def parse_html_record_for_date(html_text: str, target: date) -> Dict[str, Any]:
 
 # ============== KONTROL (aturan barumu) ==============
 def compute_kontrol(diag_items: List[str], tindakan: List[str], default_kontrol: str, when: date) -> str:
-    # 1) jika tindakan mengandung Ekstraksi / Odontektomi → POD VII
     if any(re.search(r"(?i)\b(Ekstraksi|Odontektomi)\b", t) for t in tindakan):
         return "POD VII"
-
-    # 2) jika diagnosa mengandung POD VII → '-'
     if any(re.search(r"(?i)\bPOD\s*VII\b", d) for d in diag_items):
-        # bonus hemimandibulektomi/rekonstruksi → POD X (3 hari kemudian)
         if any(re.search(r"(?i)(hemimandibulektomi|rekonstruksi)", d) for d in diag_items):
             dtx = when + timedelta(days=3)
             hari = ["senin","selasa","rabu","kamis","jumat","sabtu","minggu"][dtx.weekday()]
             return f"POD X ({hari},{dtx.strftime('%d/%m/%Y')})"
         return "-"
-
-    # 3) fallback: dari Pro ...
     return default_kontrol or "-"
 
 # ============== BUILD REVIEW (format persis) ==============
@@ -347,7 +264,6 @@ def build_review(rec: Dict[str, Any], operator: str, index_no: int, target_day: 
     lines.append(fmt_bullet("Tanggal lahir", tgl))
     lines.append(fmt_bullet("RM", rm))
 
-    # Diagnosa: 1 item inline, >1 bullets
     if len(diag_items) <= 1:
         lines.append(fmt_bullet("Diagnosa", diag_items[0] if diag_items else ""))
     else:
@@ -355,7 +271,6 @@ def build_review(rec: Dict[str, Any], operator: str, index_no: int, target_day: 
         for d in diag_items:
             lines.append(f"    * {d}")
 
-    # Tindakan: dari PLAN saja
     if single_tindakan:
         lines.append(fmt_bullet("Tindakan", tindakan[0] if tindakan else ""))
     else:
@@ -390,13 +305,12 @@ if uploaded_files:
     for f in uploaded_files:
         html = f.read().decode("utf-8", errors="ignore")
         rec = parse_html_record_for_date(html, target=target_date)
-        if rec.get("cppt"):     # hanya pasien yang punya CPPT pada tanggal target
+        if rec.get("cppt"):
             records.append(rec)
 
     if not records:
         st.warning("Tidak ada CPPT pada tanggal yang dipilih di file-file yang diupload.")
     else:
-        # urutkan ASC by jam pada tanggal target
         records.sort(key=lambda r: r["cppt"]["dt"])
         outputs = [build_review(r, operator_all, i, target_date) for i, r in enumerate(records, start=1)]
         final_text = "\n\n".join(outputs)
