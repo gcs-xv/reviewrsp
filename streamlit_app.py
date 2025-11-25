@@ -7,17 +7,18 @@ from dateutil import parser as dtparser
 
 # ============== FORMAT (kolon & spasi rata) ==============
 LABEL_COL = 18
+
 def fmt_main(label, val):
-    # Simple format so it looks good when copy-pasted into WhatsApp/Notes (no column padding)
-    return f"{label} : {val}".rstrip()
+    # Label dipanjangin ke lebar tetap supaya kira-kira sejajar saat dibaca
+    return f"{label:<{LABEL_COL}} : {val}".rstrip()
 
 def fmt_bullet(label, val):
-    # Bullet version without padding; will look consistent in proportional fonts
-    return f"• {label} : {val}".rstrip()
+    # Versi bullet, pakai lebar label yang sama
+    return f"• {label:<{LABEL_COL}} : {val}".rstrip()
 
 def fmt_head(label):
-    # Header line for multi-item sections
-    return f"• {label} :"
+    # Header untuk bagian multi-item (Diagnosa:, Tindakan:)
+    return f"• {label:<{LABEL_COL}} :"
 
 def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
