@@ -8,17 +8,27 @@ from dateutil import parser as dtparser
 # ============== FORMAT (kolon & spasi rata) ==============
 LABEL_COL = 18
 
+ # gunakan EM SPACE untuk alignment WA
+EM = "\u2003"
+
+def _wa_pad(label: str, width: int) -> str:
+    # hitung selisih
+    diff = width - len(label)
+    if diff < 1:
+        return label
+    return label + (EM * diff)
+
 def fmt_main(label, val):
-    # Label dipanjangin ke lebar tetap supaya kira-kira sejajar saat dibaca
-    return f"{label:<{LABEL_COL}} : {val}".rstrip()
+    pad = _wa_pad(label, LABEL_COL)
+    return f"{pad} : {val}".rstrip()
 
 def fmt_bullet(label, val):
-    # Versi bullet, pakai lebar label yang sama
-    return f"• {label:<{LABEL_COL}} : {val}".rstrip()
+    pad = _wa_pad(label, LABEL_COL)
+    return f"• {pad} : {val}".rstrip()
 
 def fmt_head(label):
-    # Header untuk bagian multi-item (Diagnosa:, Tindakan:)
-    return f"• {label:<{LABEL_COL}} :"
+    pad = _wa_pad(label, LABEL_COL)
+    return f"• {pad} :"
 
 def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
