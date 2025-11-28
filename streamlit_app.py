@@ -135,6 +135,23 @@ def split_plan_only(plan_text: str) -> List[str]:
     t = re.sub(r"\s*[-–—]\s*", "\n", t)
     t = re.sub(r",(?!\s?\d{2}\b)", "\n", t)
     rows = [re.sub(r"\s+", " ", r).strip(" .;") for r in t.splitlines()]
+
+    # Add rules to split complex actions
+    # Replace combined "Thorax xray" with "Thorax X-ray"
+    rows = [re.sub(r"(?i)Thorax\s*xray", "Thorax X-ray", r) for r in rows]
+    # Ensure "Konsul Cardio" separated
+    new_rows = []
+    for r in rows:
+        if re.search(r"(?i)Konsul\s*Cardio", r):
+            parts = re.split(r"(?i)(Konsul\s*Cardio)", r)
+            for part in parts:
+                part = part.strip()
+                if part:
+                    new_rows.append(part)
+        else:
+            new_rows.append(r)
+    rows = new_rows
+
     rows = [r for r in rows if r]
 
     normed: List[str] = []
@@ -148,6 +165,9 @@ def split_plan_only(plan_text: str) -> List[str]:
         # Additional normalization for OPG X and X ray patterns
         if re.search(r"OPG X", x, flags=re.I) or re.search(r"X ray", x, flags=re.I):
             x = "OPG X-ray"
+        # Remove standalone "ray"
+        if x.lower() == "ray":
+            continue
         if not x or EXCLUDE_NOT_ACTION.search(x):
             continue
 
@@ -185,6 +205,12 @@ def derive_sections(ai_text: str, plan_text: str):
     if any(re.search(r"(?i)x[- ]?ray|opg|periapikal", x) for x in tindakan):
         if all("konsultasi" not in x.lower() for x in tindakan):
             tindakan.insert(0, "Konsultasi")
+
+    # Add rule: for diag items containing "POD VII" with "Odontektomi" or "Ekstraksi", append "dalam lokal anestesi" if missing.
+    for i, d in enumerate(diag_items):
+        if "POD VII" in d:
+            if re.search(r"(?i)(Odontektomi|Ekstraksi)", d) and "dalam lokal anestesi" not in d.lower():
+                diag_items[i] = d.strip() + " dalam lokal anestesi"
 
     single_tindakan = (len(tindakan) <= 1)
     return diag_items, tindakan, single_tindakan, kontrol_default
