@@ -93,6 +93,8 @@ def split_diag(ai_text: str) -> List[str]:
     - Tambahan aturan: hentikan di 'ai' (tidak perlu disertakan)
     """
     t = _clean(ai_text)
+    # autocorrect common typo
+    t = re.sub(r"(?i)impkasi", "impaksi", t)
 
     # ✅ Rule baru: stop di 'ai' dan buang sisanya
     if re.search(r"\bai\b", t, flags=re.I):
@@ -130,56 +132,74 @@ EXCLUDE_NOT_ACTION = re.compile(
 
 def split_plan_only(plan_text: str) -> List[str]:
     t = _clean(plan_text)
+    # pisah sebelum "Pro ..." jika nempel di belakang tindakan lain
     t = re.sub(r"\s+(?=Pro\s)", "\n", t, flags=re.I)
+    # ganti bullet jadi newline
     t = t.replace("•", "\n").replace("·", "\n")
+    # pisah di dash
     t = re.sub(r"\s*[-–—]\s*", "\n", t)
+    # koma yang bukan pemisah angka gigi → newline
     t = re.sub(r",(?!\s?\d{2}\b)", "\n", t)
+
     rows = [re.sub(r"\s+", " ", r).strip(" .;") for r in t.splitlines()]
 
-    # Add rules to split complex actions
-    # Replace combined "Thorax xray" with "Thorax X-ray"
+    # normalisasi tulisan Thorax xray
     rows = [re.sub(r"(?i)Thorax\s*xray", "Thorax X-ray", r) for r in rows]
-    # Ensure "Konsul Cardio" separated
-    new_rows = []
+
+    # pisahkan "Thorax X-ray Konsul Cardio (EKG)" → ["Thorax X-ray", "Konsul Cardio (EKG)"]
+    new_rows: List[str] = []
     for r in rows:
-        if re.search(r"(?i)Konsul\s*Cardio", r):
-            parts = re.split(r"(?i)(Konsul\s*Cardio)", r)
-            for part in parts:
-                part = part.strip()
-                if part:
-                    new_rows.append(part)
+        m = re.search(r"(?i)Konsul\s*Cardio", r)
+        if m:
+            before = r[:m.start()].strip()
+            after  = r[m.start():].strip()
+            if before:
+                new_rows.append(before)
+            if after:
+                new_rows.append(after)
         else:
             new_rows.append(r)
-    rows = new_rows
-
-    rows = [r for r in rows if r]
+    rows = [r for r in new_rows if r]
 
     normed: List[str] = []
     for r in rows:
         x = r
+        # normalisasi istilah imaging
         x = re.sub(r"\bopg\b", "OPG X-ray", x, flags=re.I)
         x = re.sub(r"\bperiapikal\b", "Periapikal X-ray", x, flags=re.I)
-        x = re.sub(r"\bkonsul\b", "Konsul interna", x, flags=re.I)
-        x = re.sub(r"\bkonsultasi\b", "Konsultasi", x, flags=re.I)
+        # hanya benahi kapitalisasi "konsul interna"; jangan ubah semua "konsul" jadi interna
+        x = re.sub(r"(?i)konsul\s+interna", "Konsul interna", x)
+        # benahi kapitalisasi konsultasi
+        x = re.sub(r"(?i)konsultasi", "Konsultasi", x)
+        # buang bagian setelah kata "Resep" supaya tindakan tidak hilang oleh teks resep
+        x = re.sub(r"(?i)\bResep\b.*", "", x)
         x = _clean(x)
-        # Additional normalization for OPG X and X ray patterns
-        if re.search(r"OPG X", x, flags=re.I) or re.search(r"X ray", x, flags=re.I):
-            x = "OPG X-ray"
-        # Remove standalone "ray"
+
+        # perbaiki pola OPG X / X ray yang kepotong → jadi satu "OPG X-ray"
+        if re.search(r"OPG\s*X", x, flags=re.I) or re.search(r"X\s*ray", x, flags=re.I):
+            if re.search(r"(?i)\bopg\b", x):
+                x = "OPG X-ray"
+        # buang baris "ray" sendirian
         if x.lower() == "ray":
             continue
+
+        # filter edukasi, diet, obat, alat, dll (bukan tindakan)
         if not x or EXCLUDE_NOT_ACTION.search(x):
             continue
 
+        # Normalisasi teks tindakan utama menjadi pola baku
         m = re.search(r"(?i)\bodontektomi\b(?:\s+gigi)?\s*(\d{2})", x)
-        if m: x = f"Odontektomi gigi {m.group(1)} dalam lokal anestesi"
+        if m:
+            x = f"Odontektomi gigi {m.group(1)} dalam lokal anestesi"
         m = re.search(r"(?i)\bekstrak[si]\w*\b(?:\s+gigi)?\s*(\d{2})", x)
-        if m: x = f"Ekstraksi gigi {m.group(1)} dalam lokal anestesi"
+        if m:
+            x = f"Ekstraksi gigi {m.group(1)} dalam lokal anestesi"
 
-        x = re.sub(r"(?i)\bResep\b.*", "", x).strip(" ;")
+        x = x.strip(" ;")
         if x and x not in normed:
             normed.append(x)
 
+    # kalau ada aff hecting → pastikan cuci luka ikut
     if any(re.search(r"(?i)\baff?\s*hecting\b|\bhecting\b", s) for s in normed):
         if not any(re.search(r"(?i)\bcuci luka\b", s) for s in normed):
             normed.insert(0, "Cuci luka intra oral dengan NaCL 0.9%")
