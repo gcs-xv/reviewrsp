@@ -133,7 +133,7 @@ def split_plan_only(plan_text: str) -> List[str]:
     t = re.sub(r"\s+(?=Pro\s)", "\n", t, flags=re.I)
     t = t.replace("•", "\n").replace("·", "\n")
     t = re.sub(r"\s*[-–—]\s*", "\n", t)
-    t = t.replace(",", "\n")
+    t = re.sub(r",(?!\s?\d{2}\b)", "\n", t)
     rows = [re.sub(r"\s+", " ", r).strip(" .;") for r in t.splitlines()]
     rows = [r for r in rows if r]
 
@@ -145,6 +145,9 @@ def split_plan_only(plan_text: str) -> List[str]:
         x = re.sub(r"\bkonsul\b", "Konsul interna", x, flags=re.I)
         x = re.sub(r"\bkonsultasi\b", "Konsultasi", x, flags=re.I)
         x = _clean(x)
+        # Additional normalization for OPG X and X ray patterns
+        if re.search(r"OPG X", x, flags=re.I) or re.search(r"X ray", x, flags=re.I):
+            x = "OPG X-ray"
         if not x or EXCLUDE_NOT_ACTION.search(x):
             continue
 
@@ -208,6 +211,7 @@ def parse_html_record_for_date(html_text: str, target: date) -> Dict[str, Any]:
                     tel = mt.group(1) if mt else val
 
     chosen = None
+    rows = []
     for t in soup.select("table.tbl_form table"):
         txt = t.get_text(" ", strip=True)
         if "Tanggal" not in txt or "Plan/Monitoring" not in txt:
@@ -230,13 +234,35 @@ def parse_html_record_for_date(html_text: str, target: date) -> Dict[str, Any]:
                 "ai":     tds[4].get_text(" ", strip=True) if len(tds) > 4 else "",
                 "plan":   tds[5].get_text(" ", strip=True) if len(tds) > 5 else "",
             }
-            if (chosen is None) or (row["dt"] > chosen["dt"]):
-                chosen = row
+            rows.append(row)
+
+    # Filter rows by doctor names (case-insensitive)
+    valid_doctors = ["ruslin","yossy","gazali","carolina","stevanie"]
+    filtered_rows = [r for r in rows if any(name in r["doctor"].lower() for name in valid_doctors)]
+
+    if filtered_rows:
+        chosen_rows = filtered_rows
+    else:
+        chosen_rows = rows
+
+    for row in chosen_rows:
+        if (chosen is None) or (row["dt"] > chosen["dt"]):
+            chosen = row
 
     return {"nama": nama, "rm": rm, "tgl": tgl, "tel": tel, "cppt": chosen}
 
 # ============== KONTROL (aturan barumu) ==============
 def compute_kontrol(diag_items: List[str], tindakan: List[str], default_kontrol: str, when: date) -> str:
+    # New rule:
+    # If diagnosis contains "Impaksi gigi XX" and tindakan list contains "Konsultasi" or "OPG X-ray",
+    # return Pro Odontektomi gigi XX dalam lokal anestesi.
+    for d in diag_items:
+        m_impaksi = re.search(r"(?i)impaksi gigi (\d{2})", d)
+        if m_impaksi and any(t.lower() in ["konsultasi", "opg x-ray"] for t in tindakan):
+            return f"Pro Odontektomi gigi {m_impaksi.group(1)} dalam lokal anestesi"
+        m_gangren = re.search(r"(?i)gangren (pulpa|radiks) gigi (\d{2})", d)
+        if m_gangren and any(t.lower() in ["konsultasi", "opg x-ray"] for t in tindakan):
+            return f"Pro Ekstraksi gigi {m_gangren.group(2)} dalam lokal anestesi"
     if any(re.search(r"(?i)\b(Ekstraksi|Odontektomi)\b", t) for t in tindakan):
         return "POD VII"
     if any(re.search(r"(?i)\bPOD\s*VII\b", d) for d in diag_items):
