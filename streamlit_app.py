@@ -44,13 +44,13 @@ def format_date_ddmmyyyy(s: str) -> str:
 def map_dpjp(doctor: str) -> str:
     key = (doctor or "").lower()
     if re.search(r"yossy|yoanita|ariestiana", key):
-        return "drg. Yossy Yoanita Ariestiana, M.KG., Sp.B.M.M., Subsp.Ortognat-D(K)"
+        return "drg. Yossy Yoanita Ariestiana, M.KG., Sp.B.M.Mf., Subsp.Ortognat.D"
     if "ruslin" in key:
-        return "Prof. drg. Muhammad Ruslin, M.Kes., Ph.D., Sp.B.M.M., Subsp. Orthognat-D (K)"
+        return "Prof. drg. Muhammad Ruslin, M.Kes., Ph.D., Sp.B.M.Mf.,Subsp.Orthognat.D"
     if "gazali" in key:
-        return "drg. Mohammad Gazali, MARS., Sp.B.M.M., Subsp.T.M.T.M.J(K)"
+        return "drg. Mohammad Gazali, MARS., Sp.B.M.Mf., Subsp.Tr.Mf.S.Tm."
     if "carolina" in key or "stevanie" in key:
-        return "drg. Carolina Stevanie, Sp.B.M.M"
+        return "drg. Carolina Stevanie, Sp.B.M.Mf."
     return ""
 
 # ============== DIAGNOSA (gabung potongan, 1 item = inline) ==============
