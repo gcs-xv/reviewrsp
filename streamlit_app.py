@@ -363,11 +363,14 @@ def build_review(rec: Dict[str, Any], operator: str, index_no: int, target_day: 
 st.set_page_config(page_title="RSPTN Review (HTML + Tanggal)", page_icon="🩺", layout="centered")
 st.title("🩺 RSPTN Review Generator — HTML (filter per tanggal)")
 
+
 colA, colB = st.columns([1,1])
 with colA:
     target_date = st.date_input("Tanggal yang dilihat", value=date.today())
 with colB:
-    operator_all = st.text_input("Operator (berlaku ke semua)", "")
+    operator_1 = st.text_input("Operator 1", "")
+
+operator_2 = st.text_input("Operator 2 (opsional, untuk selang-seling)", "")
 
 uploaded_files = st.file_uploader(
     "Upload 1 atau lebih file HTML (Print → Save as HTML dari SIMRS)",
@@ -386,7 +389,18 @@ if uploaded_files:
         st.warning("Tidak ada CPPT pada tanggal yang dipilih di file-file yang diupload.")
     else:
         records.sort(key=lambda r: r["cppt"]["dt"])
-        outputs = [build_review(r, operator_all, i, target_date) for i, r in enumerate(records, start=1)]
+
+        op1 = (operator_1 or "").strip()
+        op2 = (operator_2 or "").strip()
+
+        outputs = []
+        for i, r in enumerate(records, start=1):
+            if op2:
+                op = op1 if (i % 2 == 1) else op2
+            else:
+                op = op1
+            outputs.append(build_review(r, op, i, target_date))
+
         final_text = "\n\n".join(outputs)
 
         st.success("✅ Review selesai.")
